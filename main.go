@@ -19,9 +19,16 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 }
 func (cfg *apiConfig) metricsEnd(w http.ResponseWriter, r *http.Request) {
 	res := []byte{}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	w.Write(fmt.Appendf(res, "Hits: %v\n", cfg.fileserverHits.Load()))
+	w.Write(fmt.Appendf(res, `
+	<html>
+		<body>
+			<h1>Welcome, Chirpy Admin</h1>
+			<p>Chirpy has been visited %d times!</p>
+		</body>
+	</html>
+		`, cfg.fileserverHits.Load()))
 }
 func (cfg *apiConfig) metricsReset(w http.ResponseWriter, r *http.Request) {
 	res := []byte{}
@@ -34,16 +41,18 @@ func main() {
 	apiCfg := apiConfig{}
 	port := "8080"
 	filepathRoot := "/app/"
+	apiPath := "/api"
+	adminPath := "/admin"
 	mux := http.NewServeMux()
 	mux.Handle(filepathRoot, apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
 
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET "+apiPath+"/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
-	mux.HandleFunc("/metrics", apiCfg.metricsEnd)
-	mux.HandleFunc("/reset", apiCfg.metricsReset)
+	mux.HandleFunc("GET "+adminPath+"/metrics", apiCfg.metricsEnd)
+	mux.HandleFunc("POST "+adminPath+"/reset", apiCfg.metricsReset)
 
 	server := &http.Server{
 		Handler: mux,
