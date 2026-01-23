@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
+	"strings"
 	"sync/atomic"
 )
 
@@ -54,12 +56,23 @@ func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
 	w.Write(data)
 }
 
+func profaneCensor(msg string) string {
+	badWords := []string{"kerfuffle", "sharbert", "fornax"}
+	msgSlice := strings.Split(msg, " ")
+	for idx, word := range msgSlice {
+		if slices.Contains(badWords, strings.ToLower(word)) {
+			msgSlice[idx] = "****"
+		}
+	}
+	return strings.Join(msgSlice, " ")
+}
+
 func validationHandler(w http.ResponseWriter, r *http.Request) {
 	type chirp struct {
 		Body string `json:"body"`
 	}
 	type validated struct {
-		ValidCheck bool `json:"valid"`
+		CleansedBody string `json:"cleaned_body"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -69,14 +82,16 @@ func validationHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		respondWithError(w, 500, fmt.Sprintf("Error decoding the message: %s", err))
 	}
-	respBody := validated{
-		ValidCheck: true,
-	}
 	if len([]rune(message.Body)) > 140 {
-		respBody.ValidCheck = false
 		code = 400
 		respondWithError(w, code, "Chirp is too long.")
+		return
 	}
+
+	respBody := validated{
+		CleansedBody: profaneCensor(message.Body),
+	}
+
 	respondWithJSON(w, code, respBody)
 }
 
