@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/FG-GIS/boot-dev-chirpy/internal/auth"
 	"github.com/FG-GIS/boot-dev-chirpy/internal/database"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -39,6 +40,11 @@ type validChirp struct {
 	UserID       uuid.UUID `json:"user_id"`
 }
 
+type userData struct {
+	Password string `json:"password"`
+	Email    string `json:"email"`
+}
+
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg.fileserverHits.Add(1)
@@ -61,17 +67,19 @@ func (cfg *apiConfig) metricsEnd(w http.ResponseWriter, r *http.Request) {
 func (cfg *apiConfig) metricsReset(w http.ResponseWriter, r *http.Request) {
 	if cfg.platform != "dev" {
 		respondWithError(w, 403, "Endpoint limited for development access.")
+		return
 	}
 	cfg.dbQueries.Reset(r.Context())
-	res := []byte{}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	w.Write(fmt.Appendf(res, "Hits reset from: %v\nTo: 0\nUsers table reset.", cfg.fileserverHits.Swap(0)))
+	w.Write(fmt.Appendf([]byte{}, "Hits reset from: %v\nTo: 0\nUsers table reset.", cfg.fileserverHits.Swap(0)))
 }
 
 func respondWithError(w http.ResponseWriter, code int, errorMsg string) {
 	log.Print(errorMsg)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(code)
+	w.Write(fmt.Append([]byte{}, errorMsg))
 }
 
 func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
@@ -108,6 +116,7 @@ func (cfg *apiConfig) validationHandler(w http.ResponseWriter, r *http.Request) 
 	code := 200
 	if err != nil {
 		respondWithError(w, 500, fmt.Sprintf("Error decoding the message: %s", err))
+		return
 	}
 	if len([]rune(message.Body)) > 140 {
 		code = 400
@@ -121,6 +130,7 @@ func (cfg *apiConfig) validationHandler(w http.ResponseWriter, r *http.Request) 
 	})
 	if err != nil {
 		respondWithError(w, 500, fmt.Sprintf("Error creating chirp record: %s", err))
+		return
 	}
 	respBody := validChirp{
 		ID:           usr.ID,
@@ -135,18 +145,27 @@ func (cfg *apiConfig) validationHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 func (cfg *apiConfig) addUser(w http.ResponseWriter, r *http.Request) {
-	type userData struct {
-		Email string `json:"email"`
-	}
 	decoder := json.NewDecoder(r.Body)
-	mail := userData{}
-	err := decoder.Decode(&mail)
+	usrData := userData{}
+	err := decoder.Decode(&usrData)
 	if err != nil {
 		respondWithError(w, 500, fmt.Sprintf("Error decoding message: %s", err))
+		return
 	}
-	dbUser, err := cfg.dbQueries.CreateUser(r.Context(), mail.Email)
+
+	hashP, err := auth.HashPassword(usrData.Password)
+	if err != nil {
+		respondWithError(w, 400, fmt.Sprintf("Error hashing password: %s", err))
+		return
+	}
+
+	dbUser, err := cfg.dbQueries.CreateUser(r.Context(), database.CreateUserParams{
+		Email:          usrData.Email,
+		HashedPassword: hashP,
+	})
 	if err != nil {
 		respondWithError(w, 400, fmt.Sprintf("Error creating user: %s", err))
+		return
 	}
 	user := User{
 		ID:        dbUser.ID,
@@ -162,6 +181,7 @@ func (cfg *apiConfig) getChirps(w http.ResponseWriter, r *http.Request) {
 	chirps := []validChirp{}
 	if err != nil {
 		respondWithError(w, 500, fmt.Sprintf("Error retrieving chirps from database: %v", err))
+		return
 	}
 	for _, chi := range rawChirpSlice {
 		chirps = append(chirps, validChirp{
@@ -179,10 +199,12 @@ func (cfg *apiConfig) getChirpById(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(r.PathValue("chirpID"))
 	if err != nil {
 		respondWithError(w, 400, fmt.Sprintf("Error converting chirp ID: %s", err))
+		return
 	}
 	chirp, err := cfg.dbQueries.GetChirpByID(r.Context(), id)
 	if err != nil {
 		respondWithError(w, 404, fmt.Sprintf("Error chirp not found: %s", err))
+		return
 	}
 	vChirp := validChirp{
 		ID:           chirp.ID,
@@ -192,6 +214,38 @@ func (cfg *apiConfig) getChirpById(w http.ResponseWriter, r *http.Request) {
 		UserID:       chirp.UserID,
 	}
 	respondWithJSON(w, 200, vChirp)
+}
+
+func (cfg *apiConfig) userLogin(w http.ResponseWriter, r *http.Request) {
+	decoder := json.NewDecoder(r.Body)
+	usrData := userData{}
+	err := decoder.Decode(&usrData)
+	if err != nil {
+		respondWithError(w, 500, fmt.Sprintf("Error decoding message: %s", err))
+		return
+	}
+	usr, err := cfg.dbQueries.GetUserByMail(r.Context(), usrData.Email)
+	if err != nil {
+		respondWithError(w, 401, "Incorrect email or password")
+		return
+	}
+	check, err := auth.CheckPasswordHash(usrData.Password, usr.HashedPassword)
+	if err != nil {
+		respondWithError(w, 401, "Incorrect email or password")
+		return
+	}
+	if !check {
+		respondWithError(w, 401, "Incorrect email or password")
+		return
+	}
+	fmt.Printf("Password sent was: %s\n", usrData.Password)
+	usrResponse := User{
+		ID:        usr.ID,
+		CreatedAt: usr.CreatedAt,
+		UpdatedAt: usr.UpdatedAt,
+		Email:     usr.Email,
+	}
+	respondWithJSON(w, 200, usrResponse)
 }
 
 func main() {
@@ -224,6 +278,7 @@ func main() {
 	mux.HandleFunc("GET "+apiPath+"/chirps", apiCfg.getChirps)
 	mux.HandleFunc("POST "+apiPath+"/users", apiCfg.addUser)
 	mux.HandleFunc("GET "+apiPath+"/chirps/{chirpID}", apiCfg.getChirpById)
+	mux.HandleFunc("POST "+apiPath+"/login", apiCfg.userLogin)
 
 	server := &http.Server{
 		Handler: mux,
