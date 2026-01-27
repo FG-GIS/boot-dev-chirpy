@@ -1,9 +1,12 @@
 package auth
 
 import (
+	"fmt"
 	"github.com/alexedwards/argon2id"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"net/http"
+	"strings"
 	"time"
 )
 
@@ -54,4 +57,12 @@ func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 		return uuid.UUID{}, err
 	}
 	return out, nil
+}
+
+func GetBearerToken(headers http.Header) (string, error) {
+	auth, ok := headers["Authorization"]
+	if !ok {
+		return "", fmt.Errorf("Error, authorization header missing.")
+	}
+	return strings.Replace(string(auth[0]), "Bearer ", "", 1), nil
 }

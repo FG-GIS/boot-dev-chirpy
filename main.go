@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -23,6 +24,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
 	platform       string
+	tknSecret      string
 }
 
 type User struct {
@@ -30,6 +32,7 @@ type User struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
+	Token     string    `json:"token"`
 }
 
 type validChirp struct {
@@ -41,8 +44,9 @@ type validChirp struct {
 }
 
 type userData struct {
-	Password string `json:"password"`
-	Email    string `json:"email"`
+	Password       string `json:"password"`
+	Email          string `json:"email"`
+	ExpirationTime int    `json:"expires_in_seconds"`
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -82,7 +86,7 @@ func respondWithError(w http.ResponseWriter, code int, errorMsg string) {
 	w.Write(fmt.Append([]byte{}, errorMsg))
 }
 
-func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
+func respondWithJSON(w http.ResponseWriter, code int, payload any) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		respondWithError(w, 500, fmt.Sprintf("Error marshaling JSON: %s", err))
@@ -106,13 +110,21 @@ func profaneCensor(msg string) string {
 
 func (cfg *apiConfig) validationHandler(w http.ResponseWriter, r *http.Request) {
 	type chirp struct {
-		Body   string    `json:"body"`
-		UserID uuid.UUID `json:"user_id"`
+		Body string `json:"body"`
+	}
+
+	brToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, 401, fmt.Sprintf("Error retrieving authorization: %s", err))
+	}
+	userID, err := auth.ValidateJWT(brToken, cfg.tknSecret)
+	if err != nil {
+		respondWithError(w, 401, fmt.Sprintf("Error unauthorized: %s", err))
 	}
 
 	decoder := json.NewDecoder(r.Body)
 	message := chirp{}
-	err := decoder.Decode(&message)
+	err = decoder.Decode(&message)
 	code := 200
 	if err != nil {
 		respondWithError(w, 500, fmt.Sprintf("Error decoding the message: %s", err))
@@ -126,7 +138,7 @@ func (cfg *apiConfig) validationHandler(w http.ResponseWriter, r *http.Request) 
 	msg := profaneCensor(message.Body)
 	usr, err := cfg.dbQueries.CreateChirp(r.Context(), database.CreateChirpParams{
 		Body:   msg,
-		UserID: message.UserID,
+		UserID: userID,
 	})
 	if err != nil {
 		respondWithError(w, 500, fmt.Sprintf("Error creating chirp record: %s", err))
@@ -224,6 +236,9 @@ func (cfg *apiConfig) userLogin(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, 500, fmt.Sprintf("Error decoding message: %s", err))
 		return
 	}
+	if usrData.ExpirationTime == 0 || usrData.ExpirationTime > 3600 {
+		usrData.ExpirationTime = 3600
+	}
 	usr, err := cfg.dbQueries.GetUserByMail(r.Context(), usrData.Email)
 	if err != nil {
 		respondWithError(w, 401, "Incorrect email or password")
@@ -238,12 +253,18 @@ func (cfg *apiConfig) userLogin(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, 401, "Incorrect email or password")
 		return
 	}
-	fmt.Printf("Password sent was: %s\n", usrData.Password)
+	expTime, err := time.ParseDuration(strconv.Itoa(usrData.ExpirationTime) + "s")
+	if err != nil {
+		respondWithError(w, 401, "Error parsing expiration time")
+		return
+	}
+	tkn, err := auth.MakeJWT(usr.ID, cfg.tknSecret, expTime)
 	usrResponse := User{
 		ID:        usr.ID,
 		CreatedAt: usr.CreatedAt,
 		UpdatedAt: usr.UpdatedAt,
 		Email:     usr.Email,
+		Token:     tkn,
 	}
 	respondWithJSON(w, 200, usrResponse)
 }
@@ -259,6 +280,7 @@ func main() {
 	apiCfg := apiConfig{
 		dbQueries: database.New(db),
 		platform:  os.Getenv("PLATFORM"),
+		tknSecret: os.Getenv("SECRET"),
 	}
 	port := "8080"
 	filepathRoot := "/app/"
