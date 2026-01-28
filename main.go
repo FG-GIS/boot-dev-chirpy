@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -28,11 +27,12 @@ type apiConfig struct {
 }
 
 type User struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
-	Token     string    `json:"token"`
+	ID           uuid.UUID `json:"id"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Email        string    `json:"email"`
+	Token        string    `json:"token"`
+	RefreshToken string    `json:"refresh_token"`
 }
 
 type validChirp struct {
@@ -44,9 +44,9 @@ type validChirp struct {
 }
 
 type userData struct {
-	Password       string `json:"password"`
-	Email          string `json:"email"`
-	ExpirationTime int    `json:"expires_in_seconds"`
+	Password string `json:"password"`
+	Email    string `json:"email"`
+	// ExpirationTime int    `json:"expires_in_seconds"`
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -236,9 +236,6 @@ func (cfg *apiConfig) userLogin(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, 500, fmt.Sprintf("Error decoding message: %s", err))
 		return
 	}
-	if usrData.ExpirationTime == 0 || usrData.ExpirationTime > 3600 {
-		usrData.ExpirationTime = 3600
-	}
 	usr, err := cfg.dbQueries.GetUserByMail(r.Context(), usrData.Email)
 	if err != nil {
 		respondWithError(w, 401, "Incorrect email or password")
@@ -253,20 +250,57 @@ func (cfg *apiConfig) userLogin(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, 401, "Incorrect email or password")
 		return
 	}
-	expTime, err := time.ParseDuration(strconv.Itoa(usrData.ExpirationTime) + "s")
+	rfrToken, err := auth.MakeRefreshToken()
 	if err != nil {
-		respondWithError(w, 401, "Error parsing expiration time")
+		respondWithError(w, 500, fmt.Sprintf("Server error, creating refresh token: %s", err))
 		return
 	}
-	tkn, err := auth.MakeJWT(usr.ID, cfg.tknSecret, expTime)
+	rfrTokenEntry, err := cfg.dbQueries.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+		Token:  rfrToken,
+		UserID: usr.ID,
+	})
+	if err != nil {
+		respondWithError(w, 500, fmt.Sprintf("Server error, creating refresh token: %s", err))
+		return
+	}
+	tkn, err := auth.MakeJWT(usr.ID, cfg.tknSecret, 1*time.Hour)
 	usrResponse := User{
-		ID:        usr.ID,
-		CreatedAt: usr.CreatedAt,
-		UpdatedAt: usr.UpdatedAt,
-		Email:     usr.Email,
-		Token:     tkn,
+		ID:           usr.ID,
+		CreatedAt:    usr.CreatedAt,
+		UpdatedAt:    usr.UpdatedAt,
+		Email:        usr.Email,
+		Token:        tkn,
+		RefreshToken: rfrTokenEntry.Token,
 	}
 	respondWithJSON(w, 200, usrResponse)
+}
+
+func (cfg *apiConfig) TkHandlerRefresh(w http.ResponseWriter, r *http.Request) {
+	type token struct {
+		Tk string `json:"token"`
+	}
+	rfrTk, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, 401, "Incorrect Header")
+		return
+	}
+	dbRfrTk, err := cfg.dbQueries.GetRefreshToken(r.Context(), rfrTk)
+	if err != nil {
+		respondWithError(w, 401, fmt.Sprintf("Bad Token: %s", err))
+		return
+	}
+	if !dbRfrTk.RevokedAt.Time.IsZero() {
+		respondWithError(w, 401, "Token Expired")
+		return
+	}
+
+	dbUsr, err := cfg.dbQueries.GetUserFromRefreshToken(r.Context(), dbRfrTk.Token)
+	if err != nil {
+		respondWithError(w, 500, fmt.Sprintf("Database error: %s", err))
+		return
+	}
+	respToken, err := auth.MakeJWT(dbUsr.ID, cfg.tknSecret, 1*time.Hour)
+	respondWithJSON(w, 200, token{Tk: respToken})
 }
 
 func main() {
@@ -301,6 +335,7 @@ func main() {
 	mux.HandleFunc("POST "+apiPath+"/users", apiCfg.addUser)
 	mux.HandleFunc("GET "+apiPath+"/chirps/{chirpID}", apiCfg.getChirpById)
 	mux.HandleFunc("POST "+apiPath+"/login", apiCfg.userLogin)
+	mux.HandleFunc("POST "+apiPath+"/refresh", apiCfg.TkHandlerRefresh)
 
 	server := &http.Server{
 		Handler: mux,

@@ -89,6 +89,8 @@ func TestValidateJWTFailBadToken(t *testing.T) {
 	if err != nil {
 		t.Errorf("Error creating the token: %s", err)
 	}
+	time.Sleep(tkDuration)
+	time.Sleep(tkDuration)
 	tkCheck, err := auth.ValidateJWT(jwt, "wrongToken")
 	if err == nil {
 		t.Error("ValidateJWT supposed to error out, bad secret token.")
