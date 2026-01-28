@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -83,7 +84,10 @@ func respondWithError(w http.ResponseWriter, code int, errorMsg string) {
 	log.Print(errorMsg)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(code)
-	w.Write(fmt.Append([]byte{}, errorMsg))
+	_, err := w.Write(fmt.Append([]byte{}, errorMsg))
+	if err != nil {
+		log.Printf("Error w.Write: %s\n", err)
+	}
 }
 
 func respondWithJSON(w http.ResponseWriter, code int, payload any) {
@@ -94,7 +98,10 @@ func respondWithJSON(w http.ResponseWriter, code int, payload any) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	w.Write(data)
+	_, err = w.Write(data)
+	if err != nil {
+		log.Printf("Error w.Write: %s\n", err)
+	}
 }
 
 func profaneCensor(msg string) string {
@@ -106,6 +113,21 @@ func profaneCensor(msg string) string {
 		}
 	}
 	return strings.Join(msgSlice, " ")
+}
+
+func (cfg *apiConfig) validateRefreshToken(h http.Header, cont context.Context) (database.RefreshToken, error) {
+	rfrTk, err := auth.GetBearerToken(h)
+	if err != nil {
+		return database.RefreshToken{}, err
+	}
+	dbRfrTk, err := cfg.dbQueries.GetRefreshToken(cont, rfrTk)
+	if err != nil {
+		return database.RefreshToken{}, err
+	}
+	if !dbRfrTk.RevokedAt.Time.IsZero() {
+		return database.RefreshToken{}, fmt.Errorf("Refresh token expired")
+	}
+	return dbRfrTk, nil
 }
 
 func (cfg *apiConfig) validationHandler(w http.ResponseWriter, r *http.Request) {
@@ -279,21 +301,11 @@ func (cfg *apiConfig) TkHandlerRefresh(w http.ResponseWriter, r *http.Request) {
 	type token struct {
 		Tk string `json:"token"`
 	}
-	rfrTk, err := auth.GetBearerToken(r.Header)
+	dbRfrTk, err := cfg.validateRefreshToken(r.Header, r.Context())
 	if err != nil {
-		respondWithError(w, 401, "Incorrect Header")
+		respondWithError(w, 401, fmt.Sprintf("Error with the refresh token: %s", err))
 		return
 	}
-	dbRfrTk, err := cfg.dbQueries.GetRefreshToken(r.Context(), rfrTk)
-	if err != nil {
-		respondWithError(w, 401, fmt.Sprintf("Bad Token: %s", err))
-		return
-	}
-	if !dbRfrTk.RevokedAt.Time.IsZero() {
-		respondWithError(w, 401, "Token Expired")
-		return
-	}
-
 	dbUsr, err := cfg.dbQueries.GetUserFromRefreshToken(r.Context(), dbRfrTk.Token)
 	if err != nil {
 		respondWithError(w, 500, fmt.Sprintf("Database error: %s", err))
@@ -301,6 +313,23 @@ func (cfg *apiConfig) TkHandlerRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	respToken, err := auth.MakeJWT(dbUsr.ID, cfg.tknSecret, 1*time.Hour)
 	respondWithJSON(w, 200, token{Tk: respToken})
+}
+
+func (cfg *apiConfig) revokeRefreshToken(w http.ResponseWriter, r *http.Request) {
+	dbRfrTk, err := cfg.validateRefreshToken(r.Header, r.Context())
+	if err != nil {
+		respondWithError(w, 401, fmt.Sprintf("Error with the refresh token: %s", err))
+		return
+	}
+	revokedTk, err := cfg.dbQueries.RevokeRefreshToken(r.Context(), database.RevokeRefreshTokenParams{
+		Token: dbRfrTk.Token,
+		RevokedAt: sql.NullTime{
+			Time:  time.Now(),
+			Valid: true,
+		},
+	})
+	fmt.Printf("Token %s\nRevoked at:%s\n", revokedTk.Token, revokedTk.RevokedAt.Time.String())
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func main() {
@@ -336,6 +365,7 @@ func main() {
 	mux.HandleFunc("GET "+apiPath+"/chirps/{chirpID}", apiCfg.getChirpById)
 	mux.HandleFunc("POST "+apiPath+"/login", apiCfg.userLogin)
 	mux.HandleFunc("POST "+apiPath+"/refresh", apiCfg.TkHandlerRefresh)
+	mux.HandleFunc("POST "+apiPath+"/revoke", apiCfg.revokeRefreshToken)
 
 	server := &http.Server{
 		Handler: mux,
