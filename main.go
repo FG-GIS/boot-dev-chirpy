@@ -130,18 +130,27 @@ func (cfg *apiConfig) validateRefreshToken(h http.Header, cont context.Context) 
 	return dbRfrTk, nil
 }
 
+func (cfg *apiConfig) validateAccessToken(h http.Header) (uuid.UUID, error) {
+	brToken, err := auth.GetBearerToken(h)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("Error retrieving authorization: %s", err)
+	}
+	userID, err := auth.ValidateJWT(brToken, cfg.tknSecret)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("Error unauthorized: %s", err)
+	}
+	return userID, nil
+}
+
 func (cfg *apiConfig) validationHandler(w http.ResponseWriter, r *http.Request) {
 	type chirp struct {
 		Body string `json:"body"`
 	}
 
-	brToken, err := auth.GetBearerToken(r.Header)
+	userID, err := cfg.validateAccessToken(r.Header)
 	if err != nil {
-		respondWithError(w, 401, fmt.Sprintf("Error retrieving authorization: %s", err))
-	}
-	userID, err := auth.ValidateJWT(brToken, cfg.tknSecret)
-	if err != nil {
-		respondWithError(w, 401, fmt.Sprintf("Error unauthorized: %s", err))
+		respondWithError(w, 401, fmt.Sprintf("Error validating acces token: %s", err))
+		return
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -232,7 +241,7 @@ func (cfg *apiConfig) getChirps(w http.ResponseWriter, r *http.Request) {
 func (cfg *apiConfig) getChirpById(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(r.PathValue("chirpID"))
 	if err != nil {
-		respondWithError(w, 400, fmt.Sprintf("Error converting chirp ID: %s", err))
+		respondWithError(w, 500, fmt.Sprintf("Error converting chirp ID: %s", err))
 		return
 	}
 	chirp, err := cfg.dbQueries.GetChirpByID(r.Context(), id)
@@ -332,6 +341,71 @@ func (cfg *apiConfig) revokeRefreshToken(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (cfg *apiConfig) updateUser(w http.ResponseWriter, r *http.Request) {
+	userID, err := cfg.validateAccessToken(r.Header)
+	if err != nil {
+		respondWithError(w, 401, fmt.Sprintf("Error validating access token: %s", err))
+		return
+	}
+	usrData := userData{}
+	decoder := json.NewDecoder(r.Body)
+	err = decoder.Decode(&usrData)
+	if err != nil {
+		respondWithError(w, 500, fmt.Sprintf("Error decoding request: %s", err))
+		return
+	}
+	newHash, err := auth.HashPassword(usrData.Password)
+	if err != nil {
+		respondWithError(w, 500, fmt.Sprintf("Server error: %s", err))
+		return
+	}
+	usr, err := cfg.dbQueries.UpdateCredentials(r.Context(), database.UpdateCredentialsParams{
+		ID:             userID,
+		Email:          usrData.Email,
+		HashedPassword: newHash,
+	})
+
+	usrResponse := User{
+		ID:        usr.ID,
+		CreatedAt: usr.CreatedAt,
+		UpdatedAt: usr.UpdatedAt,
+		Email:     usr.Email,
+	}
+	respondWithJSON(w, 200, usrResponse)
+}
+
+func (cfg *apiConfig) delChirpById(w http.ResponseWriter, r *http.Request) {
+	tk, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, 401, fmt.Sprintf("Unauthorized: %s", err))
+		return
+	}
+	usrId, err := auth.ValidateJWT(tk, cfg.tknSecret)
+	if err != nil {
+		respondWithError(w, 403, fmt.Sprintf("Forbidden: %s", err))
+		return
+	}
+	id, err := uuid.Parse(r.PathValue("chirpID"))
+	if err != nil {
+		respondWithError(w, 500, fmt.Sprintf("Error converting chirp ID: %s", err))
+		return
+	}
+	chirp, err := cfg.dbQueries.GetChirpByID(r.Context(), id)
+	if err != nil {
+		respondWithError(w, 404, fmt.Sprintf("Error chirp not found: %s", err))
+		return
+	}
+	if chirp.UserID != usrId {
+		respondWithError(w, 403, "Forbidden")
+		return
+	}
+	err = cfg.dbQueries.DeleteChirpByID(r.Context(), id)
+	if err != nil {
+		respondWithError(w, 500, fmt.Sprintf("Something went wrong: %s", err))
+	}
+	w.WriteHeader(204) // http.StatusNoContent
+}
+
 func main() {
 	godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
@@ -366,6 +440,8 @@ func main() {
 	mux.HandleFunc("POST "+apiPath+"/login", apiCfg.userLogin)
 	mux.HandleFunc("POST "+apiPath+"/refresh", apiCfg.TkHandlerRefresh)
 	mux.HandleFunc("POST "+apiPath+"/revoke", apiCfg.revokeRefreshToken)
+	mux.HandleFunc("PUT "+apiPath+"/users", apiCfg.updateUser)
+	mux.HandleFunc("DELETE "+apiPath+"/chirps/{chirpID}", apiCfg.delChirpById)
 
 	server := &http.Server{
 		Handler: mux,

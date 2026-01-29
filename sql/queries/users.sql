@@ -20,3 +20,9 @@ DELETE FROM users;
 -- name: GetUserByMail :one
 SELECT * FROM users
 WHERE email=$1;
+
+-- name: UpdateCredentials :one
+UPDATE users
+SET email = $2, hashed_password = $3
+WHERE id = $1
+RETURNING *;
