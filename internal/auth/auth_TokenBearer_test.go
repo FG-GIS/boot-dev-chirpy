@@ -9,9 +9,10 @@ import (
 
 func TestBearerTokenSuccess(t *testing.T) {
 	headers := make(http.Header)
-	headers.Add("authorization", "Bearer testtokenbearer")
+	tkn := "testtokenbearer"
+	headers.Add("authorization", "Bearer "+tkn)
 	test, err := auth.GetBearerToken(headers)
-	if err != nil {
+	if err != nil || test != tkn {
 		t.Errorf("Error in GetBearerToken: %s\n", err)
 	}
 	t.Logf("auth is: %v\n", test)

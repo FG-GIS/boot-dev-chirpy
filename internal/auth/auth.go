@@ -3,7 +3,6 @@ package auth
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -63,11 +62,8 @@ func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 }
 
 func GetBearerToken(headers http.Header) (string, error) {
-	auth, ok := headers["Authorization"]
-	if !ok {
-		return "", fmt.Errorf("Error, authorization header missing.")
-	}
-	return strings.Replace(string(auth[0]), "Bearer ", "", 1), nil
+	auth := headers.Get("Authorization")
+	return strings.Replace(auth, "Bearer ", "", 1), nil
 }
 
 func MakeRefreshToken() (string, error) {
@@ -77,4 +73,9 @@ func MakeRefreshToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(key), nil
+}
+
+func GetAPIKey(headers http.Header) (string, error) {
+	auth := headers.Get("Authorization")
+	return strings.Replace(auth, "ApiKey ", "", 1), nil
 }

@@ -25,6 +25,7 @@ type apiConfig struct {
 	dbQueries      *database.Queries
 	platform       string
 	tknSecret      string
+	apiPolka       string
 }
 
 type User struct {
@@ -417,9 +418,18 @@ func (cfg *apiConfig) upgradeUserRed(w http.ResponseWriter, r *http.Request) {
 			UserID uuid.UUID `json:"user_id"`
 		} `json:"data"`
 	}
+	apiKey, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		respondWithError(w, 403, "Forbidden")
+		return
+	}
+	if apiKey != cfg.apiPolka {
+		respondWithError(w, 401, "Unauthorized.")
+		return
+	}
 	polkaWeb := PolkaWebhook{}
 	decoder := json.NewDecoder(r.Body)
-	err := decoder.Decode(&polkaWeb)
+	err = decoder.Decode(&polkaWeb)
 	if err != nil {
 		respondWithError(w, 500, fmt.Sprintf("Server error decoding request: %s", err))
 		return
@@ -451,6 +461,7 @@ func main() {
 		dbQueries: database.New(db),
 		platform:  os.Getenv("PLATFORM"),
 		tknSecret: os.Getenv("SECRET"),
+		apiPolka:  os.Getenv("POLKA_KEY"),
 	}
 	port := "8080"
 	filepathRoot := "/app/"
