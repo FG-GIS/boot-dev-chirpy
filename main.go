@@ -34,6 +34,7 @@ type User struct {
 	Email        string    `json:"email"`
 	Token        string    `json:"token"`
 	RefreshToken string    `json:"refresh_token"`
+	RedStatus    bool      `json:"is_chirpy_red"`
 }
 
 type validChirp struct {
@@ -215,6 +216,7 @@ func (cfg *apiConfig) addUser(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: dbUser.CreatedAt,
 		UpdatedAt: dbUser.UpdatedAt,
 		Email:     dbUser.Email,
+		RedStatus: dbUser.IsChirpyRed,
 	}
 	respondWithJSON(w, 201, user)
 }
@@ -302,6 +304,7 @@ func (cfg *apiConfig) userLogin(w http.ResponseWriter, r *http.Request) {
 		Email:        usr.Email,
 		Token:        tkn,
 		RefreshToken: rfrTokenEntry.Token,
+		RedStatus:    usr.IsChirpyRed,
 	}
 	respondWithJSON(w, 200, usrResponse)
 }
@@ -370,6 +373,7 @@ func (cfg *apiConfig) updateUser(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: usr.CreatedAt,
 		UpdatedAt: usr.UpdatedAt,
 		Email:     usr.Email,
+		RedStatus: usr.IsChirpyRed,
 	}
 	respondWithJSON(w, 200, usrResponse)
 }
@@ -404,6 +408,35 @@ func (cfg *apiConfig) delChirpById(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, 500, fmt.Sprintf("Something went wrong: %s", err))
 	}
 	w.WriteHeader(204) // http.StatusNoContent
+}
+
+func (cfg *apiConfig) upgradeUserRed(w http.ResponseWriter, r *http.Request) {
+	type PolkaWebhook struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserID uuid.UUID `json:"user_id"`
+		} `json:"data"`
+	}
+	polkaWeb := PolkaWebhook{}
+	decoder := json.NewDecoder(r.Body)
+	err := decoder.Decode(&polkaWeb)
+	if err != nil {
+		respondWithError(w, 500, fmt.Sprintf("Server error decoding request: %s", err))
+		return
+	}
+	if polkaWeb.Event != "user.upgraded" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	err = cfg.dbQueries.UpdateRedStatus(r.Context(), database.UpdateRedStatusParams{
+		ID:          polkaWeb.Data.UserID,
+		IsChirpyRed: true,
+	})
+	if err != nil {
+		respondWithError(w, 404, "Error. User not found.")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func main() {
@@ -442,6 +475,7 @@ func main() {
 	mux.HandleFunc("POST "+apiPath+"/revoke", apiCfg.revokeRefreshToken)
 	mux.HandleFunc("PUT "+apiPath+"/users", apiCfg.updateUser)
 	mux.HandleFunc("DELETE "+apiPath+"/chirps/{chirpID}", apiCfg.delChirpById)
+	mux.HandleFunc("POST "+apiPath+"/polka/webhooks", apiCfg.upgradeUserRed)
 
 	server := &http.Server{
 		Handler: mux,
