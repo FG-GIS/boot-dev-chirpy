@@ -223,8 +223,19 @@ func (cfg *apiConfig) addUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) getChirps(w http.ResponseWriter, r *http.Request) {
-	rawChirpSlice, err := cfg.dbQueries.GetChirps(r.Context())
+	author := r.URL.Query().Get("author_id")
+	auth_id, err := uuid.Parse(author)
+	rawChirpSlice := []database.Chirp{}
 	chirps := []validChirp{}
+	if err != nil {
+		respondWithError(w, 400, fmt.Sprintf("Bad request: %s", err))
+		return
+	}
+	if author != "" {
+		rawChirpSlice, err = cfg.dbQueries.GetChirpsAuthor(r.Context(), auth_id)
+	} else {
+		rawChirpSlice, err = cfg.dbQueries.GetChirps(r.Context())
+	}
 	if err != nil {
 		respondWithError(w, 500, fmt.Sprintf("Error retrieving chirps from database: %v", err))
 		return
