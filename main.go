@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -224,14 +225,19 @@ func (cfg *apiConfig) addUser(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) getChirps(w http.ResponseWriter, r *http.Request) {
 	author := r.URL.Query().Get("author_id")
-	auth_id, err := uuid.Parse(author)
-	rawChirpSlice := []database.Chirp{}
-	chirps := []validChirp{}
-	if err != nil {
-		respondWithError(w, 400, fmt.Sprintf("Bad request: %s", err))
-		return
+	order := r.URL.Query().Get("sort")
+	if order == "" {
+		order = "asc"
 	}
+	var rawChirpSlice []database.Chirp
+	var err error
+	chirps := []validChirp{}
 	if author != "" {
+		auth_id, err := uuid.Parse(author)
+		if err != nil {
+			respondWithError(w, 400, fmt.Sprintf("Bad request: %s", err))
+			return
+		}
 		rawChirpSlice, err = cfg.dbQueries.GetChirpsAuthor(r.Context(), auth_id)
 	} else {
 		rawChirpSlice, err = cfg.dbQueries.GetChirps(r.Context())
@@ -247,6 +253,11 @@ func (cfg *apiConfig) getChirps(w http.ResponseWriter, r *http.Request) {
 			UpdatedAt:    chi.UpdatedAt,
 			CleansedBody: chi.Body,
 			UserID:       chi.UserID,
+		})
+	}
+	if order == "desc" {
+		sort.Slice(chirps, func(i, j int) bool {
+			return chirps[i].CreatedAt.After(chirps[j].CreatedAt)
 		})
 	}
 	respondWithJSON(w, 200, chirps)
